@@ -32,10 +32,10 @@ A bilingual (Arabic/English) evaluation dataset built from real resumes, used to
 ## 2. Use Case and Scope
 
 **What's in scope?**
-- Comparing extraction quality across three candidate models (GPT, Qwen2.5-14B, Qwen2.5-7B)
+- Comparing extraction quality across three candidate models (GPT-5.6 sol, Qwen2.5-14B, Qwen2.5-7B)
 - Selecting one model (Qwen2.5-14B) for deeper infrastructure and inference benchmarking
 - Building a 72-resume bilingual evaluation dataset (36 Arabic, 36 English) with verified ground truth
-- Measuring both extraction accuracy and serving performance (latency, throughput, GPU usage) for the selected model
+- Measuring both extraction quality and serving performance (latency, throughput, GPU usage) for the selected model
 - A working web app for live resume upload and extraction.
 - Job matching: HR adds a job description and the system scores each uploaded resume against it
 
@@ -49,7 +49,7 @@ Three models were evaluated for extraction quality on the full 72-resume bilingu
 
 | Model | Type | Tested For |
 |---|---|---|
-| GPT | API-based | Extraction quality (Arabic + English) |
+| GPT-5.6 sol | API-based | Extraction quality (Arabic + English) |
 | Qwen2.5-7B | Open-source, 7B | Extraction quality (Arabic + English) |
 | Qwen2.5-14B | Open-source, 14B | Extraction quality (Arabic + English) |
 ## 4. Deployment Architecture
@@ -97,13 +97,13 @@ After the dataset was assembled, each entry was programmatically verified agains
 
 The evaluation followed a two-stage process:
 
-1. **Quality benchmarking** — Three candidate models (GPT, Qwen2.5-14B, Qwen2.5-7B) were run against the full 72-resume bilingual dataset (36 English, 36 Arabic), and each model's output was scored against the human-annotated ground truth using the metrics defined in Section 5 (Correctness, Completeness, Relevance, Hallucination, Instruction Following, Structured Output, Schema Compliance). Results were then compared across both languages to select the model with the most consistent and reliable performance, prioritizing low hallucination alongside extraction accuracy.
+1. **Quality benchmarking** — Three candidate models (GPT-5.6 sol, Qwen2.5-14B, Qwen2.5-7B) were run against the full 72-resume bilingual dataset (36 English, 36 Arabic), and each model's output was scored against the human-annotated ground truth using the metrics defined below (Correctness, Completeness, Relevance, Hallucination, Instruction Following, Structured Output, Schema Compliance). Results were then compared across both languages to select the model with the most consistent and reliable performance, prioritizing low hallucination alongside extraction quality.
 
 2. **Infrastructure benchmarking** — The selected model (Qwen2.5-14B) was deployed via vLLM and benchmarked for inference performance (latency, throughput, GPU usage) under the deployment architecture described in Section 4.
 
 ## 6.1. Quality benchmarking
 This section describes how each quality dimension was measured for the 
-resume extraction task, across three models (GPT, Qwen2.5-14B, Qwen2.5-7B) and
+resume extraction task, across three models (GPT-5.6 sol, Qwen2.5-14B, Qwen2.5-7B) and
 two languages (English, Arabic). All automated metrics were computed by
 comparing each model's structured JSON output against a human-annotated
 ground-truth JSON and, where relevant, against the original CV source text.
@@ -381,7 +381,16 @@ production request shape rather than a synthetic workload.
 **Question:** How is a given concurrency level (e.g. "4 concurrent
 requests") actually produced?
 
-**Measurement.** For each concurrency level c in {1, 2, 4, 8}, c requests are built by cycling through the dataset and dispatched together via asyncio.gather. 
+**Measurement.** For each concurrency level `c` in `{1, 2, 4, 8}`, a
+workload of `c` resumes is built by cycling through the evaluation
+dataset (`resumes[i % len(resumes)] for i in range(c)`), so a small
+dataset can still populate higher concurrency tiers. All `c` requests for
+a tier are dispatched at the same time using `asyncio.gather`, with each
+request's blocking HTTP call offloaded to a thread pool
+(`loop.run_in_executor`) so the requests genuinely overlap in wall-clock
+time rather than running one after another. The four concurrency levels
+themselves are tested sequentially, one tier fully completing before the
+next begins.
 
 **Output field(s):** `concurrency`
 
@@ -390,7 +399,12 @@ requests") actually produced?
 **Question:** How long does a user wait before the model starts
 responding?
 
-**Measurement.** Each request is sent with stream=True. TTFT is the wall-clock time from sending the request to the first SSE chunk with non-empty content (choices[0].delta.content) — capturing queueing plus prompt-processing time, not just network latency.
+**Measurement.** Each request is sent with `stream=True` against the
+vLLM OpenAI-compatible `/chat/completions` endpoint. TTFT is measured as
+the wall-clock time between sending the request and the first
+server-sent-event (SSE) chunk that contains non-empty generated content
+(`choices[0].delta.content`) — i.e. it captures queueing time plus
+prompt-processing time, not just network latency.
 
 **Formula:**
 
@@ -408,7 +422,11 @@ concurrency tier.
 **Question:** Once the model starts responding, how fast does it
 generate tokens?
 
-**Measurement.** Generation speed excludes TTFT: output_tokens / (total_latency − TTFT), isolating the decode-only rate from startup/queueing overhead.
+**Measurement.** For each request, the decode-only duration is isolated
+by subtracting TTFT from the total request latency, then dividing the
+number of output tokens by that duration. This deliberately excludes
+TTFT so that generation speed reflects only the token-by-token decoding
+rate, not startup/queueing overhead.
 
 **Formula:**
 
@@ -516,7 +534,7 @@ Error Rate = failed_requests_in_tier / total_requests_in_tier
 
 ### Table 1: English Resume Extraction Results
 
-| Quality Dimension | Metric | GPT | Qwen2.5 14B | Qwen2.5 7B |
+| Quality Dimension | Metric | GPT-5.6 sol | Qwen2.5 14B | Qwen2.5 7B |
 |---|---|---|---|---|
 | Correctness | Extraction Precision | 76.71% | 88.63% | 88.65% |
 | Completeness | Extraction Recall | 95.23% | 92.49% | 88.90% |
@@ -531,7 +549,7 @@ Error Rate = failed_requests_in_tier / total_requests_in_tier
 
 ### Table 2: Arabic Resume Extraction Results
 
-| Quality Dimension | Metric | GPT | Qwen2.5 14B | Qwen2.5 7B |
+| Quality Dimension | Metric | GPT-5.6 sol | Qwen2.5 14B | Qwen2.5 7B |
 |---|---|---|---|---|
 | Correctness | Extraction Precision | 96.13% | 96.85% | 92.77% |
 | Completeness | Extraction Recall | 97.98% | 96.90% | 93.83% |
@@ -605,9 +623,9 @@ Error Rate = failed_requests_in_tier / total_requests_in_tier
 
 Across both languages, Qwen2.5-14B was the most reliable model overall, even though it was not the top performer on every single metric.
 
-On the Arabic subset, Qwen2.5-14B was the only model with zero hallucinations (0.00%), while Qwen2.5-7B hallucinated in nearly half of its extractions (48.84%) — a critical failure for an HR use case, where inventing a candidate's skills or certifications is unacceptable. GPT also showed a noticeable hallucination rate (6.00%) compared to Qwen2.5-14B.
+On the Arabic subset, Qwen2.5-14B was the only model with zero hallucinations (0.00%), while Qwen2.5-7B hallucinated in nearly half of its extractions (48.84%) — a critical failure for an HR use case, where inventing a candidate's skills or certifications is unacceptable. GPT-5.6 sol also showed a noticeable hallucination rate (6.00%) compared to Qwen2.5-14B.
 
-On the English subset, GPT had the weakest Correctness score (76.71% Precision), meaning a large share of its extracted fields were inaccurate, despite scoring highest on Completeness (95.23% Recall). Qwen2.5-14B had the best overall balance, with the highest F1 score (90.52%) and the lowest hallucination rate (0.89%).
+On the English subset, GPT-5.6 sol had the weakest Correctness score (76.71% Precision), meaning a large share of its extracted fields were inaccurate, despite scoring highest on Completeness (95.23% Recall). Qwen2.5-14B had the best overall balance, with the highest F1 score (90.52%) and the lowest hallucination rate (0.89%).
 
 Qwen2.5-7B performed competitively on standard metrics in both languages, but its extreme hallucination rate on Arabic resumes made it unsuitable for production use, despite being the smallest and cheapest model to run.
 
@@ -655,7 +673,6 @@ Choosing to self-host Qwen2.5-14B via vLLM instead of using a managed API (like 
 **Manual annotation is far more time-consuming than it looks.** The 72-resume dataset was synthetically generated, then each ground-truth JSON had to be manually written and checked field-by-field against its source resume. This manual verification step was tedious and eye-straining in practice, which highlighted why manual annotation doesn't scale well and why automated evaluation pipelines are valuable once a reliable ground truth exists.
 
 ## 13. Optional Stretch Work
-
 Further development is planned for the resume-parsing and job-matching pipelines, including:
 
 - Support for additional file formats beyond .docx, such as PDF and image-based resumes (e.g., scanned or photographed CVs)
